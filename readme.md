@@ -20,6 +20,7 @@ A mobile application for hotel clients and cab drivers (operated by hotel-affili
 ### 1. Client (Hotel Guest)
 - Login using hotel-provided credentials (mobile mandatory)
 - Book cab based on location and car preference
+- Can schedule a ride for later
 - View booking status
 - Chat/Call assigned driver
 - Provide OTP for ride start
@@ -162,7 +163,6 @@ A mobile application for hotel clients and cab drivers (operated by hotel-affili
 
 ## Optional Features
 
-- Scheduled Rides
 - Estimated Arrival Time
 - Rating/Feedback system
 - Google Maps SDK for live navigation and directions
