@@ -183,3 +183,32 @@ src/
 ├── navigation/       # React Navigation config
 ├── utils/            # Helper functions (formatting, validation, etc.)
 └── assets/           # Images, fonts, etc.
+```
+
+
+# Some Ui/Ux Inspirations:
+
+### Role_Selection_Screen
+![Role_Screen](./layouts/Role_Screen.png)
+
+### Login_Screen
+![Login_Screen](./layouts/Login-Screen.png)
+
+### Client's_Home_Screen
+![Client's_Home_Screen](./layouts/Home%20page%20(TBD).png)
+
+### Location_Screen
+![Location_Screen](./layouts/Location-Screen.png)
+
+### Choose_Vehicle_Screen
+![Choose_Vehicle_Screen](./layouts/Choose-Vehicle.png)
+
+### Accept_Complete_Ride_Screen
+![Accecpt_Complete_Screen](./layouts/Accept-Complete.png)
+
+
+---
+---
+---
+---
+
