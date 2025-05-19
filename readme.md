@@ -1,4 +1,77 @@
 ```js
+
+// server.js
+
+const express = require('express');
+const cors = require('cors');
+const app = express();
+const PORT = 5173;
+
+// Middleware to parse JSON requests (if needed)
+app.use(express.json());
+app.use(cors());
+
+// GET request to the root route
+app.get('/add/data', (req, res) => {
+    const person = {
+         name: "John Doe",      
+        age: 30,
+        gender: "Male",
+        email: "john.doe@example.com",
+        phone: "+1-555-1234",
+      };
+     
+      console.log(person);
+     
+  res.json(person);
+});
+
+
+// POST request to handle form data submission
+app.post('/add/driver', (req, res) => {
+    const { name, aadhar, email, contact } = req.body;
+ 
+    const newPerson = {
+        name,
+        email,
+        contact: parseInt(contact),
+        aadhar
+        
+    };
+   
+    res.status(200).json({ message: "Data submitted successfully", data: newPerson });
+    console.log(newPerson);
+  });
+
+
+// POST request to handle form data submission
+app.post('/add/dr', (req, res) => {
+    const { name, age, email, number } = req.body;
+ 
+    const newPerson = {
+        name,
+        age: parseInt(age),
+        email,
+        number: parseInt(number)
+    };
+   
+    res.status(200).json({ message: "Data submitted successfully", data: newPerson });
+    console.log(newPerson);
+  });
+
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
+
+
+
+
+```
+
+
+
+```js
 import React, { useEffect, useState } from 'react';
 
 function App() {
