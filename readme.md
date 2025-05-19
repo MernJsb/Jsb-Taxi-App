@@ -1,3 +1,151 @@
+```js
+import React, { useEffect, useState } from 'react';
+
+function App() {
+  const [data, setData] = useState(null);
+
+  const [formData, setFormData] = useState({
+      name: '',
+      age: '',
+      number: '',
+      email: '',
+    });
+  
+    const [responseMsg, setResponseMsg] = useState('');
+  
+    const handleChange = (e) => {
+      const { name, value } = e.target;
+      setFormData(prev => ({ ...prev, [name]: value }));
+    };
+  
+    const handleSubmit = (e) => {
+      e.preventDefault();
+  
+      fetch('http://192.168.34.95:3000/form', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(formData),
+      })
+        .then(res => res.json())
+        .then(data => {
+          setResponseMsg(data.data);
+        })
+        .catch(err => {
+          console.error(err);
+          setResponseMsg('Submission failed.');
+        });
+    };
+
+
+
+
+
+
+
+  useEffect(() => {
+    fetch('http://192.168.34.95:3000/api/data') // Use Laptop B's IP
+      .then(res => res.json())
+      .then(json => setData(json))
+      .catch(err => console.error(err));
+  }, []);
+
+  return (
+    <div style={{ marginTop: '50px', padding: '20px', fontFamily: 'sans-serif' }}>
+      <div>
+
+      {data ? (
+        <>
+          <p><strong>Name:</strong> {data.name}</p>
+          <p><strong>Email:</strong> {data.email}</p>
+          <p><strong>Age:</strong> {data.age}</p>
+          <p><strong>Gender:</strong> {data.gender}</p>
+          <p><strong>Phone:</strong> {data.phone}</p>
+          <p><strong>Phodfdffne:</strong> {data.phonddfe}</p>
+        </>
+      ) : (
+        <p>Loading...</p>
+      )}
+      </div>
+
+      <div>
+         <div style={{ padding: '30px', maxWidth: '400px', margin: 'auto' }}>
+      <h2>Submit Your Info</h2>
+      <form onSubmit={handleSubmit}>
+        <div style={{ marginBottom: '10px' }}>
+
+          <label>Name:</label><br />
+          <input
+            type="text"
+            name="name"
+            value={formData.name}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '10px' }}>
+
+          <label>Age:</label><br />
+          <input
+            type="number"
+            name="age"
+            value={formData.age}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '10px' }}>
+
+          <label>Phone Number:</label><br />
+          <input
+            type="text"
+            name="number"
+            value={formData.number}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <div style={{ marginBottom: '10px' }}>
+
+          <label>Email:</label><br />
+          <input
+            type="email"
+            name="email"
+            value={formData.email}
+            onChange={handleChange}
+            required
+          />
+        </div>
+
+        <button type="submit">Submit</button>
+      </form>
+
+      {responseMsg && (
+        <div>
+
+        <p>You data:</p>
+        <p>{responseMsg.name}</p>
+        <p>{responseMsg.email}</p>
+        <p>{responseMsg.number}</p>
+        <p>{responseMsg.phone}</p>
+        </div>
+      )}
+    </div>
+      </div>
+    </div>
+  );
+}
+
+export default App;
+
+```
+
+
+
 # Hotel Cab Booking Mobile App – Project Specification (Rough Estimation - Changes to be proposed)
 
 ## Overview
