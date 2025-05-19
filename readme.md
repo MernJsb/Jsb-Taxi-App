@@ -1,4 +1,4 @@
-# Hotel Cab Booking Mobile App – Project Specification
+# Hotel Cab Booking Mobile App – Project Specification (Rough Estimation - Changes to be proposed)
 
 ## Overview
 
@@ -170,7 +170,7 @@ A mobile application for hotel clients and cab drivers (operated by hotel-affili
 
 ---
 
-## Folder Structure (Frontend)
+## Folder Structure (Frontend) - (To be Decided)
 
 ```shell
 src/
