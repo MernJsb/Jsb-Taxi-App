@@ -725,8 +725,78 @@ npm install socket.io-client
 3. **HR Approval** → Server → **Driver (instant notification)**
 4. **Status Updates** → Server → **All Connected Clients**
 
-This implementation provides a **modern, professional real-time experience** that eliminates the need for page refreshes and ensures instant communication between all parties in the taxi booking workflow!
 
+---
+---
+
+# Taxi App Workflow (for Client and Driver)
+
+## 1. Ride Request
+
+- **Client initiates a ride request** by entering:
+  - Pickup Location
+  - Drop Location
+  - Requested Time
+
+- **Ride request details** (including necessary metadata) are sent to the **server**.
+
+## 2. Ride Approval & Driver Assignment
+
+- Server **forwards the ride request** to the **HR Dashboard**.
+- **HR reviews and approves** the ride request.
+- **HR assigns a driver** to the client ride request.
+- **Assigned driver is notified** with:
+  - Client details
+  - Pickup location and time
+  - Drop location
+
+## 3. Pre-Ride Procedure
+
+- The **driver arrives** at the **pickup location 10 minutes** before the scheduled time.
+
+## 4. Ride In Progress
+
+- Once the ride begins, the **status is updated** to:
+  - `Ongoing Ride` or `Current Ride`
+
+### 4.1 Toll Booth Handling
+
+- If a **toll booth** is encountered:
+  - If **paid with cash**, driver must:
+    - Upload toll receipt
+    - Enter toll details (name, location)
+  - If **paid with FASTag**, driver must:
+    - Enter toll name and location
+    - Use GPS to fetch current location (optional for accuracy)
+
+### 4.2 Parking Charges (Optional)
+
+- If the **client requests parking** during the ride:
+  - Parking charges are added to the ride.
+  - Driver must upload:
+    - Parking location (can use GPS)
+    - Parking charges
+
+## 5. Ride Completion
+
+- On arrival at destination:
+  - **Client taps** `Mark Ride as Completed`
+  - **Client provides e-signature**
+  - **Receipt is generated** with:
+    - Ride details
+    - All charges (base + toll + parking)
+    - Editable format
+
+## 6. HR Review
+
+- HR receives the **editable receipt**.
+- HR can **edit ride receipt** as needed (for accounting, corrections, etc.)
+
+## 7. Super Admin Reporting
+
+- **Super Admin receives** a **daily statement** containing:
+  - All completed trips
+  - Full ride and financial data
 
 
 
