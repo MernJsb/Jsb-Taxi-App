@@ -480,6 +480,429 @@ const styles = StyleSheet.create({
 
 ---
 
+### Driver App
+```js
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  Alert,
+  StyleSheet,
+  ScrollView,
+  Switch
+} from 'react-native';
+import io from 'socket.io-client';
+
+const SOCKET_URL = 'http://localhost:3001'; // Replace with your server URL
+
+export default function DriverApp() {
+  const [socket, setSocket] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [available, setAvailable] = useState(true);
+  const [currentRide, setCurrentRide] = useState(null);
+  const [rideStatus, setRideStatus] = useState('idle'); // idle, assigned, en_route, completed
+
+  const driverId = 'driver_456'; // In real app, get from auth
+
+  useEffect(() => {
+    const newSocket = io(SOCKET_URL);
+    setSocket(newSocket);
+
+    newSocket.on('connect', () => {
+      setConnected(true);
+      // Register as driver
+      newSocket.emit('register_driver', {
+        driverId,
+        location: { lat: 40.7589, lng: -73.9851 }, // Mock location
+        available: available
+      });
+    });
+
+    newSocket.on('disconnect', () => {
+      setConnected(false);
+    });
+
+    // Listen for ride assignment
+    newSocket.on('ride_assigned', (rideData) => {
+      setCurrentRide(rideData);
+      setRideStatus('assigned');
+      setAvailable(false);
+      
+      Alert.alert(
+        'New Ride Assigned!',
+        `Pickup: ${rideData.pickup.address}\nDestination: ${rideData.destination.address}\nFare: $${rideData.estimatedFare}`,
+        [
+          {
+            text: 'Accept',
+            onPress: () => acceptRide(rideData.rideId)
+          },
+          {
+            text: 'Decline',
+            style: 'destructive',
+            onPress: () => declineRide(rideData.rideId)
+          }
+        ]
+      );
+    });
+
+    return () => newSocket.close();
+  }, [available]);
+
+  const toggleAvailability = () => {
+    const newAvailable = !available;
+    setAvailable(newAvailable);
+    
+    if (socket && connected) {
+      socket.emit('driver_availability_update', {
+        driverId,
+        available: newAvailable
+      });
+    }
+  };
+
+  const acceptRide = (rideId) => {
+    setRideStatus('en_route');
+    socket.emit('ride_accepted', {
+      rideId,
+      driverId,
+      estimatedArrival: '8 minutes'
+    });
+    
+    Alert.alert('Ride Accepted', 'Navigate to pickup location');
+  };
+
+  const declineRide = (rideId) => {
+    setCurrentRide(null);
+    setRideStatus('idle');
+    setAvailable(true);
+    
+    socket.emit('ride_declined', {
+      rideId,
+      driverId
+    });
+  };
+
+  const startTrip = () => {
+    setRideStatus('in_progress');
+    socket.emit('trip_started', {
+      rideId: currentRide.rideId,
+      driverId
+    });
+    
+    Alert.alert('Trip Started', 'Drive safely to destination');
+  };
+
+  const completeTrip = () => {
+    setRideStatus('completed');
+    socket.emit('trip_completed', {
+      rideId: currentRide.rideId,
+      driverId,
+      fare: currentRide.estimatedFare
+    });
+    
+    Alert.alert('Trip Completed', 'Payment processed successfully', [
+      {
+        text: 'OK',
+        onPress: () => {
+          setCurrentRide(null);
+          setRideStatus('idle');
+          setAvailable(true);
+        }
+      }
+    ]);
+  };
+
+  const getStatusColor = () => {
+    switch (rideStatus) {
+      case 'assigned': return '#FFA500';
+      case 'en_route': return '#1E90FF';
+      case 'in_progress': return '#32CD32';
+      case 'completed': return '#9370DB';
+      default: return '#808080';
+    }
+  };
+
+  const getStatusText = () => {
+    switch (rideStatus) {
+      case 'assigned': return 'Ride Assigned';
+      case 'en_route': return 'En Route to Pickup';
+      case 'in_progress': return 'Trip in Progress';
+      case 'completed': return 'Trip Completed';
+      default: return available ? 'Available' : 'Offline';
+    }
+  };
+
+  return (
+    <ScrollView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Driver App</Text>
+        <View style={[styles.status, { backgroundColor: connected ? '#32CD32' : '#FF6B6B' }]}>
+          <Text style={styles.statusText}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </Text>
+        </View>
+      </View>
+
+      {/* Driver Status */}
+      <View style={styles.statusCard}>
+        <Text style={styles.cardTitle}>Driver Status</Text>
+        
+        <View style={styles.availabilityContainer}>
+          <Text style={styles.availabilityLabel}>Available for rides</Text>
+          <Switch
+            value={available}
+            onValueChange={toggleAvailability}
+            disabled={!connected || rideStatus !== 'idle'}
+            trackColor={{ false: '#767577', true: '#81b0ff' }}
+            thumbColor={available ? '#f5dd4b' : '#f4f3f4'}
+          />
+        </View>
+
+        <View style={[styles.statusBadge, { backgroundColor: getStatusColor() }]}>
+          <Text style={styles.statusBadgeText}>{getStatusText()}</Text>
+        </View>
+      </View>
+
+      {/* Current Ride Information */}
+      {currentRide && (
+        <View style={styles.rideCard}>
+          <Text style={styles.cardTitle}>Current Ride</Text>
+          
+          <View style={styles.rideInfo}>
+            <View style={styles.locationContainer}>
+              <Text style={styles.locationLabel}>Pickup</Text>
+              <Text style={styles.locationText}>{currentRide.pickup?.address}</Text>
+            </View>
+            
+            <View style={styles.locationContainer}>
+              <Text style={styles.locationLabel}>Destination</Text>
+              <Text style={styles.locationText}>{currentRide.destination?.address}</Text>
+            </View>
+            
+            <View style={styles.fareContainer}>
+              <Text style={styles.fareLabel}>Estimated Fare</Text>
+              <Text style={styles.fareAmount}>${currentRide.estimatedFare}</Text>
+            </View>
+          </View>
+
+          {/* Client Information */}
+          {currentRide.clientMetadata && (
+            <View style={styles.clientInfo}>
+              <Text style={styles.clientTitle}>Client Information</Text>
+              <Text style={styles.clientDetail}>Name: {currentRide.clientMetadata.name}</Text>
+              <Text style={styles.clientDetail}>Phone: {currentRide.clientMetadata.phone}</Text>
+              <Text style={styles.clientDetail}>Rating: {currentRide.clientMetadata.rating}⭐</Text>
+            </View>
+          )}
+
+          {/* Action Buttons */}
+          <View style={styles.actionButtons}>
+            {rideStatus === 'en_route' && (
+              <TouchableOpacity style={styles.actionButton} onPress={startTrip}>
+                <Text style={styles.actionButtonText}>Start Trip</Text>
+              </TouchableOpacity>
+            )}
+            
+            {rideStatus === 'in_progress' && (
+              <TouchableOpacity style={styles.actionButton} onPress={completeTrip}>
+                <Text style={styles.actionButtonText}>Complete Trip</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+      )}
+
+      {/* Driver Information */}
+      <View style={styles.driverCard}>
+        <Text style={styles.cardTitle}>Driver Profile</Text>
+        <View style={styles.driverInfo}>
+          <Text style={styles.driverDetail}>ID: {driverId}</Text>
+          <Text style={styles.driverDetail}>Vehicle: Toyota Camry</Text>
+          <Text style={styles.driverDetail}>Plate: ABC123</Text>
+          <Text style={styles.driverDetail}>Rating: 4.8⭐</Text>
+          <Text style={styles.driverDetail}>Total Rides: 1,247</Text>
+        </View>
+      </View>
+
+      {/* Emergency Button */}
+      <TouchableOpacity style={styles.emergencyButton}>
+        <Text style={styles.emergencyButtonText}>🚨 Emergency</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+    padding: 20,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 30,
+    marginTop: 40,
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  status: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+  },
+  statusText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  statusCard: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    marginBottom: 20,
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 15,
+    color: '#333',
+  },
+  availabilityContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 15,
+  },
+  availabilityLabel: {
+    fontSize: 16,
+    color: '#333',
+  },
+  statusBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+  },
+  statusBadgeText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  rideCard: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    marginBottom: 20,
+    borderLeftWidth: 4,
+    borderLeftColor: '#007AFF',
+  },
+  rideInfo: {
+    marginBottom: 15,
+  },
+  locationContainer: {
+    marginBottom: 10,
+  },
+  locationLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#666',
+  },
+  locationText: {
+    fontSize: 16,
+    color: '#333',
+    marginTop: 2,
+  },
+  fareContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+  },
+  fareLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  fareAmount: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#32CD32',
+  },
+  clientInfo: {
+    backgroundColor: '#f8f9fa',
+    padding: 15,
+    borderRadius: 8,
+    marginBottom: 15,
+  },
+  clientTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 8,
+    color: '#333',
+  },
+  clientDetail: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 2,
+  },
+  actionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+  },
+  actionButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 30,
+    paddingVertical: 12,
+    borderRadius: 8,
+    flex: 1,
+    marginHorizontal: 5,
+  },
+  actionButtonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+    textAlign: 'center',
+  },
+  driverCard: {
+    backgroundColor: 'white',
+    padding: 20,
+    borderRadius: 10,
+    marginBottom: 20,
+  },
+  driverInfo: {
+    backgroundColor: '#f8f9fa',
+    padding: 15,
+    borderRadius: 8,
+  },
+  driverDetail: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 4,
+  },
+  emergencyButton: {
+    backgroundColor: '#FF3B30',
+    padding: 15,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginBottom: 20,
+  },
+  emergencyButtonText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+});
+```
+---
+
 ## 3. HR Dashboard Implementation (React Web App)
 
 ### Package.json Dependencies
