@@ -1,3 +1,1906 @@
+# Alerting Specific client and driver
+
+### `Backend Server Setup`
+```js
+const express = require('express');
+const http = require('http');
+const socketIo = require('socket.io');
+const cors = require('cors');
+
+const app = express();
+const server = http.createServer(app);
+
+// Configure CORS for Socket.IO
+const io = socketIo(server, {
+  cors: {
+    origin: "*", // In production, specify your frontend URL
+    methods: ["GET", "POST"]
+  }
+});
+
+app.use(cors());
+app.use(express.json());
+
+// Mock database - In production, use a real database
+let clients = [
+  { id: 1, name: "John Doe", email: "john@example.com", phone: "123-456-7890" },
+  { id: 2, name: "Jane Smith", email: "jane@example.com", phone: "234-567-8901" },
+  { id: 3, name: "Bob Johnson", email: "bob@example.com", phone: "345-678-9012" },
+  { id: 4, name: "Alice Brown", email: "alice@example.com", phone: "456-789-0123" },
+  { id: 5, name: "Charlie Wilson", email: "charlie@example.com", phone: "567-890-1234" }
+];
+
+let drivers = [
+  { id: 1, name: "Driver Mike", email: "mike@example.com", phone: "111-222-3333", isAvailable: true },
+  { id: 2, name: "Driver Sarah", email: "sarah@example.com", phone: "222-333-4444", isAvailable: true },
+  { id: 3, name: "Driver Tom", email: "tom@example.com", phone: "333-444-5555", isAvailable: true },
+  { id: 4, name: "Driver Lisa", email: "lisa@example.com", phone: "444-555-6666", isAvailable: true },
+  { id: 5, name: "Driver David", email: "david@example.com", phone: "555-666-7777", isAvailable: true }
+];
+
+// Store for pending ride requests
+let rideRequests = [];
+let activeRides = [];
+
+// Store connected users and their socket IDs
+const connectedUsers = {
+  clients: new Map(), // clientId -> socketId
+  drivers: new Map(), // driverId -> socketId  
+  hrManagers: new Map() // hrId -> socketId
+};
+
+// WebSocket connection handling
+io.on('connection', (socket) => {
+  console.log('New client connected:', socket.id);
+
+  // User authentication - client joins with their role and ID
+  socket.on('authenticate', (data) => {
+    const { userType, userId, userName } = data;
+    
+    console.log(`${userType} ${userName} (ID: ${userId}) connected`);
+    
+    // Store the user's socket connection based on their role
+    switch(userType) {
+      case 'client':
+        connectedUsers.clients.set(userId, socket.id);
+        socket.join(`client_${userId}`); // Join a room specific to this client
+        break;
+      case 'driver':
+        connectedUsers.drivers.set(userId, socket.id);
+        socket.join(`driver_${userId}`); // Join a room specific to this driver
+        break;
+      case 'hr':
+        connectedUsers.hrManagers.set(userId, socket.id);
+        socket.join('hr_dashboard'); // All HR managers join the same room
+        break;
+    }
+    
+    // Send confirmation back to the user
+    socket.emit('authentication_success', {
+      message: `Connected as ${userType}`,
+      userId: userId
+    });
+  });
+
+  // Handle new ride request from client
+  socket.on('request_ride', (rideData) => {
+    const { clientId, pickupLocation, dropLocation } = rideData;
+    
+    // Create a new ride request
+    const newRideRequest = {
+      id: Date.now(), // Simple ID generation
+      clientId: clientId,
+      pickupLocation: pickupLocation,
+      dropLocation: dropLocation,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      clientInfo: clients.find(c => c.id === clientId)
+    };
+    
+    // Add to pending requests
+    rideRequests.push(newRideRequest);
+    
+    console.log('New ride request:', newRideRequest);
+    
+    // Notify all HR managers in real-time
+    io.to('hr_dashboard').emit('new_ride_request', newRideRequest);
+    
+    // Send confirmation to the client
+    socket.emit('ride_request_submitted', {
+      message: 'Your ride request has been submitted',
+      requestId: newRideRequest.id
+    });
+  });
+
+  // Handle ride approval/rejection by HR
+  socket.on('process_ride_request', (data) => {
+    const { requestId, action, driverId } = data; // action: 'approve' or 'reject'
+    
+    // Find the ride request
+    const rideRequestIndex = rideRequests.findIndex(r => r.id === requestId);
+    if (rideRequestIndex === -1) {
+      socket.emit('error', { message: 'Ride request not found' });
+      return;
+    }
+    
+    const rideRequest = rideRequests[rideRequestIndex];
+    
+    if (action === 'reject') {
+      // Handle rejection
+      rideRequest.status = 'rejected';
+      
+      // Notify the specific client about rejection
+      const clientSocketId = connectedUsers.clients.get(rideRequest.clientId);
+      if (clientSocketId) {
+        io.to(`client_${rideRequest.clientId}`).emit('ride_request_rejected', {
+          message: 'Your ride request has been rejected',
+          requestId: requestId
+        });
+      }
+      
+      // Remove from pending requests
+      rideRequests.splice(rideRequestIndex, 1);
+      
+    } else if (action === 'approve' && driverId) {
+      // Handle approval and driver assignment
+      
+      // Find the driver
+      const driver = drivers.find(d => d.id === driverId);
+      if (!driver) {
+        socket.emit('error', { message: 'Driver not found' });
+        return;
+      }
+      
+      if (!driver.isAvailable) {
+        socket.emit('error', { message: 'Driver is not available' });
+        return;
+      }
+      
+      // Update driver availability
+      driver.isAvailable = false;
+      
+      // Create active ride
+      const activeRide = {
+        id: Date.now(),
+        requestId: requestId,
+        clientId: rideRequest.clientId,
+        driverId: driverId,
+        pickupLocation: rideRequest.pickupLocation,
+        dropLocation: rideRequest.dropLocation,
+        status: 'assigned',
+        timestamp: new Date().toISOString(),
+        clientInfo: rideRequest.clientInfo,
+        driverInfo: driver
+      };
+      
+      activeRides.push(activeRide);
+      
+      // Remove from pending requests
+      rideRequests.splice(rideRequestIndex, 1);
+      
+      // Notify the specific client about driver assignment
+      io.to(`client_${rideRequest.clientId}`).emit('driver_assigned', {
+        message: 'A driver has been assigned to your ride',
+        rideInfo: activeRide,
+        driverInfo: {
+          name: driver.name,
+          phone: driver.phone,
+          id: driver.id
+        }
+      });
+      
+      // Notify the specific driver about the assignment
+      io.to(`driver_${driverId}`).emit('ride_assigned', {
+        message: 'You have been assigned a new ride',
+        rideInfo: activeRide,
+        clientInfo: {
+          name: rideRequest.clientInfo.name,
+          phone: rideRequest.clientInfo.phone,
+          id: rideRequest.clientInfo.id
+        }
+      });
+      
+      // Notify HR dashboard about successful assignment
+      io.to('hr_dashboard').emit('ride_assigned_success', {
+        message: 'Driver assigned successfully',
+        rideInfo: activeRide
+      });
+      
+      console.log('Ride assigned:', activeRide);
+    }
+  });
+
+  // Handle driver status updates (accept/decline ride)
+  socket.on('update_ride_status', (data) => {
+    const { rideId, status } = data; // status: 'accepted', 'declined', 'started', 'completed'
+    
+    const rideIndex = activeRides.findIndex(r => r.id === rideId);
+    if (rideIndex === -1) {
+      socket.emit('error', { message: 'Ride not found' });
+      return;
+    }
+    
+    const ride = activeRides[rideIndex];
+    ride.status = status;
+    
+    // Notify client about status update
+    io.to(`client_${ride.clientId}`).emit('ride_status_updated', {
+      rideId: rideId,
+      status: status,
+      message: `Your ride status has been updated to: ${status}`
+    });
+    
+    // Notify HR dashboard
+    io.to('hr_dashboard').emit('ride_status_updated', {
+      rideId: rideId,
+      status: status,
+      rideInfo: ride
+    });
+    
+    // If ride is completed, make driver available again
+    if (status === 'completed') {
+      const driver = drivers.find(d => d.id === ride.driverId);
+      if (driver) {
+        driver.isAvailable = true;
+      }
+      // Optionally remove from active rides
+      activeRides.splice(rideIndex, 1);
+    }
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    console.log('Client disconnected:', socket.id);
+    
+    // Remove from connected users
+    connectedUsers.clients.forEach((socketId, clientId) => {
+      if (socketId === socket.id) {
+        connectedUsers.clients.delete(clientId);
+      }
+    });
+    
+    connectedUsers.drivers.forEach((socketId, driverId) => {
+      if (socketId === socket.id) {
+        connectedUsers.drivers.delete(driverId);
+      }
+    });
+    
+    connectedUsers.hrManagers.forEach((socketId, hrId) => {
+      if (socketId === socket.id) {
+        connectedUsers.hrManagers.delete(hrId);
+      }
+    });
+  });
+});
+
+// REST API endpoints for initial data
+app.get('/api/clients', (req, res) => {
+  res.json(clients);
+});
+
+app.get('/api/drivers', (req, res) => {
+  res.json(drivers);
+});
+
+app.get('/api/available-drivers', (req, res) => {
+  const availableDrivers = drivers.filter(driver => driver.isAvailable);
+  res.json(availableDrivers);
+});
+
+app.get('/api/pending-requests', (req, res) => {
+  res.json(rideRequests);
+});
+
+app.get('/api/active-rides', (req, res) => {
+  res.json(activeRides);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log('WebSocket server is ready for connections');
+});
+```
+
+
+### `SocketService`
+```js
+// services/SocketService.ts
+import { io, Socket } from 'socket.io-client';
+import { Alert } from 'react-native';
+
+// Define interfaces for type safety
+interface RideRequest {
+  id: number;
+  clientId: number;
+  pickupLocation: string;
+  dropLocation: string;
+  status: string;
+  timestamp: string;
+  clientInfo: any;
+}
+
+interface RideInfo {
+  id: number;
+  requestId: number;
+  clientId: number;
+  driverId: number;
+  pickupLocation: string;
+  dropLocation: string;
+  status: string;
+  timestamp: string;
+  clientInfo: any;
+  driverInfo: any;
+}
+
+interface UserInfo {
+  id: number;
+  name: string;
+  phone: string;
+}
+
+class SocketService {
+  private socket: Socket | null = null;
+  private serverUrl: string = 'http://localhost:3000'; // Change this to your server URL
+  private isConnected: boolean = false;
+
+  // Event listeners storage
+  private eventListeners: Map<string, Function[]> = new Map();
+
+  /**
+   * Initialize socket connection
+   * @param serverUrl - The server URL to connect to
+   */
+  initialize(serverUrl?: string): void {
+    if (serverUrl) {
+      this.serverUrl = serverUrl;
+    }
+
+    this.socket = io(this.serverUrl, {
+      transports: ['websocket'],
+      autoConnect: false,
+    });
+
+    this.setupEventListeners();
+  }
+
+  /**
+   * Setup basic socket event listeners
+   */
+  private setupEventListeners(): void {
+    if (!this.socket) return;
+
+    this.socket.on('connect', () => {
+      console.log('Connected to server');
+      this.isConnected = true;
+    });
+
+    this.socket.on('disconnect', () => {
+      console.log('Disconnected from server');
+      this.isConnected = false;
+    });
+
+    this.socket.on('connect_error', (error) => {
+      console.error('Connection error:', error);
+      Alert.alert('Connection Error', 'Failed to connect to server');
+    });
+
+    this.socket.on('error', (error) => {
+      console.error('Socket error:', error);
+      Alert.alert('Error', error.message || 'An error occurred');
+    });
+  }
+
+  /**
+   * Connect to the socket server
+   */
+  connect(): void {
+    if (this.socket && !this.isConnected) {
+      this.socket.connect();
+    }
+  }
+
+  /**
+   * Disconnect from the socket server
+   */
+  disconnect(): void {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.isConnected = false;
+    }
+  }
+
+  /**
+   * Authenticate user with the server
+   * @param userType - Type of user (client, driver, hr)
+   * @param userId - User ID
+   * @param userName - User name
+   */
+  authenticate(userType: 'client' | 'driver' | 'hr', userId: number, userName: string): void {
+    if (!this.socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
+    this.socket.emit('authenticate', {
+      userType,
+      userId,
+      userName,
+    });
+
+    // Listen for authentication success
+    this.socket.on('authentication_success', (data) => {
+      console.log('Authentication successful:', data);
+      this.notifyListeners('authentication_success', data);
+    });
+  }
+
+  /**
+   * Submit a ride request (Client side)
+   * @param clientId - Client ID
+   * @param pickupLocation - Pickup location
+   * @param dropLocation - Drop location
+   */
+  requestRide(clientId: number, pickupLocation: string, dropLocation: string): void {
+    if (!this.socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
+    this.socket.emit('request_ride', {
+      clientId,
+      pickupLocation,
+      dropLocation,
+    });
+  }
+
+  /**
+   * Process ride request (HR side)
+   * @param requestId - Request ID
+   * @param action - 'approve' or 'reject'
+   * @param driverId - Driver ID (required for approval)
+   */
+  processRideRequest(requestId: number, action: 'approve' | 'reject', driverId?: number): void {
+    if (!this.socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
+    this.socket.emit('process_ride_request', {
+      requestId,
+      action,
+      driverId,
+    });
+  }
+
+  /**
+   * Update ride status (Driver side)
+   * @param rideId - Ride ID
+   * @param status - New status
+   */
+  updateRideStatus(rideId: number, status: 'accepted' | 'declined' | 'started' | 'completed'): void {
+    if (!this.socket) {
+      console.error('Socket not initialized');
+      return;
+    }
+
+    this.socket.emit('update_ride_status', {
+      rideId,
+      status,
+    });
+  }
+
+  /**
+   * Add event listener for specific events
+   * @param eventName - Name of the event
+   * @param callback - Callback function to execute
+   */
+  addEventListener(eventName: string, callback: Function): void {
+    if (!this.eventListeners.has(eventName)) {
+      this.eventListeners.set(eventName, []);
+    }
+    this.eventListeners.get(eventName)!.push(callback);
+
+    // Setup socket listener if not already set
+    if (this.socket) {
+      this.socket.on(eventName, callback);
+    }
+  }
+
+  /**
+   * Remove event listener
+   * @param eventName - Name of the event
+   * @param callback - Callback function to remove
+   */
+  removeEventListener(eventName: string, callback: Function): void {
+    const listeners = this.eventListeners.get(eventName);
+    if (listeners) {
+      const index = listeners.indexOf(callback);
+      if (index > -1) {
+        listeners.splice(index, 1);
+      }
+    }
+
+    if (this.socket) {
+      this.socket.off(eventName, callback);
+    }
+  }
+
+  /**
+   * Notify all listeners of an event
+   * @param eventName - Name of the event
+   * @param data - Data to pass to listeners
+   */
+  private notifyListeners(eventName: string, data: any): void {
+    const listeners = this.eventListeners.get(eventName);
+    if (listeners) {
+      listeners.forEach(listener => listener(data));
+    }
+  }
+
+  /**
+   * Get connection status
+   */
+  getConnectionStatus(): boolean {
+    return this.isConnected;
+  }
+
+  /**
+   * Setup client-specific event listeners
+   */
+  setupClientListeners(): void {
+    if (!this.socket) return;
+
+    // Listen for ride request confirmation
+    this.socket.on('ride_request_submitted', (data) => {
+      console.log('Ride request submitted:', data);
+      Alert.alert('Success', data.message);
+      this.notifyListeners('ride_request_submitted', data);
+    });
+
+    // Listen for driver assignment
+    this.socket.on('driver_assigned', (data) => {
+      console.log('Driver assigned:', data);
+      Alert.alert('Driver Assigned', `${data.driverInfo.name} has been assigned to your ride`);
+      this.notifyListeners('driver_assigned', data);
+    });
+
+    // Listen for ride rejection
+    this.socket.on('ride_request_rejected', (data) => {
+      console.log('Ride request rejected:', data);
+      Alert.alert('Ride Rejected', data.message);
+      this.notifyListeners('ride_request_rejected', data);
+    });
+
+    // Listen for ride status updates
+    this.socket.on('ride_status_updated', (data) => {
+      console.log('Ride status updated:', data);
+      Alert.alert('Ride Update', data.message);
+      this.notifyListeners('ride_status_updated', data);
+    });
+  }
+
+  /**
+   * Setup driver-specific event listeners
+   */
+  setupDriverListeners(): void {
+    if (!this.socket) return;
+
+    // Listen for ride assignments
+    this.socket.on('ride_assigned', (data) => {
+      console.log('New ride assigned:', data);
+      Alert.alert('New Ride', `You have been assigned a ride for ${data.clientInfo.name}`);
+      this.notifyListeners('ride_assigned', data);
+    });
+  }
+
+  /**
+   * Setup HR-specific event listeners
+   */
+  setupHRListeners(): void {
+    if (!this.socket) return;
+
+    // Listen for new ride requests
+    this.socket.on('new_ride_request', (data: RideRequest) => {
+      console.log('New ride request received:', data);
+      this.notifyListeners('new_ride_request', data);
+    });
+
+    // Listen for successful ride assignments
+    this.socket.on('ride_assigned_success', (data) => {
+      console.log('Ride assigned successfully:', data);
+      Alert.alert('Success', data.message);
+      this.notifyListeners('ride_assigned_success', data);
+    });
+
+    // Listen for ride status updates
+    this.socket.on('ride_status_updated', (data) => {
+      console.log('Ride status updated:', data);
+      this.notifyListeners('ride_status_updated', data);
+    });
+  }
+
+  /**
+   * Clean up all event listeners
+   */
+  cleanup(): void {
+    if (this.socket) {
+      this.socket.removeAllListeners();
+    }
+    this.eventListeners.clear();
+  }
+}
+
+// Export singleton instance
+export const socketService = new SocketService();
+export default socketService;
+```
+
+### `ClientHome`
+```js
+// components/ClientScreen.tsx
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  ScrollView,
+  SafeAreaView,
+} from 'react-native';
+import socketService from '../services/SocketService';
+
+interface ClientScreenProps {
+  clientId: number;
+  clientName: string;
+}
+
+interface AssignedDriver {
+  id: number;
+  name: string;
+  phone: string;
+}
+
+interface RideStatus {
+  rideId: number;
+  status: string;
+  message: string;
+}
+
+const ClientScreen: React.FC<ClientScreenProps> = ({ clientId, clientName }) => {
+  const [pickupLocation, setPickupLocation] = useState<string>('');
+  const [dropLocation, setDropLocation] = useState<string>('');
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [assignedDriver, setAssignedDriver] = useState<AssignedDriver | null>(null);
+  const [currentRideStatus, setCurrentRideStatus] = useState<string>('');
+  const [rideHistory, setRideHistory] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Initialize socket service
+    socketService.initialize();
+    
+    // Setup client-specific listeners
+    setupSocketListeners();
+    
+    // Connect to server
+    socketService.connect();
+    
+    // Authenticate as client
+    socketService.authenticate('client', clientId, clientName);
+
+    // Cleanup on unmount
+    return () => {
+      socketService.cleanup();
+      socketService.disconnect();
+    };
+  }, [clientId, clientName]);
+
+  /**
+   * Setup socket event listeners for client
+   */
+  const setupSocketListeners = (): void => {
+    // Setup client-specific listeners
+    socketService.setupClientListeners();
+
+    // Listen for authentication success
+    socketService.addEventListener('authentication_success', (data: any) => {
+      console.log('Client authenticated:', data);
+      setIsConnected(true);
+    });
+
+    // Listen for ride request submission confirmation
+    socketService.addEventListener('ride_request_submitted', (data: any) => {
+      console.log('Ride request submitted:', data);
+      // Clear form after successful submission
+      setPickupLocation('');
+      setDropLocation('');
+    });
+
+    // Listen for driver assignment
+    socketService.addEventListener('driver_assigned', (data: any) => {
+      console.log('Driver assigned to client:', data);
+      setAssignedDriver(data.driverInfo);
+      setCurrentRideStatus('assigned');
+      
+      // Add to ride history
+      setRideHistory(prev => [...prev, {
+        id: data.rideInfo.id,
+        driver: data.driverInfo.name,
+        pickup: data.rideInfo.pickupLocation,
+        drop: data.rideInfo.dropLocation,
+        status: 'assigned',
+        timestamp: new Date().toLocaleString()
+      }]);
+    });
+
+    // Listen for ride request rejection
+    socketService.addEventListener('ride_request_rejected', (data: any) => {
+      console.log('Ride request rejected:', data);
+      setAssignedDriver(null);
+      setCurrentRideStatus('');
+    });
+
+    // Listen for ride status updates
+    socketService.addEventListener('ride_status_updated', (data: any) => {
+      console.log('Ride status updated for client:', data);
+      setCurrentRideStatus(data.status);
+      
+      // Update ride history
+      setRideHistory(prev => 
+        prev.map(ride => 
+          ride.id === data.rideId 
+            ? { ...ride, status: data.status }
+            : ride
+        )
+      );
+
+      // Clear assigned driver if ride is completed
+      if (data.status === 'completed') {
+        setAssignedDriver(null);
+        setCurrentRideStatus('');
+      }
+    });
+  };
+
+  /**
+   * Handle ride request submission
+   */
+  const handleRequestRide = (): void => {
+    // Validate input
+    if (!pickupLocation.trim()) {
+      Alert.alert('Error', 'Please enter pickup location');
+      return;
+    }
+
+    if (!dropLocation.trim()) {
+      Alert.alert('Error', 'Please enter drop location');
+      return;
+    }
+
+    if (!isConnected) {
+      Alert.alert('Error', 'Not connected to server');
+      return;
+    }
+
+    // Check if client already has an active ride
+    if (assignedDriver) {
+      Alert.alert('Error', 'You already have an active ride');
+      return;
+    }
+
+    // Submit ride request
+    socketService.requestRide(clientId, pickupLocation.trim(), dropLocation.trim());
+  };
+
+  /**
+   * Get status color based on ride status
+   */
+  const getStatusColor = (status: string): string => {
+    switch (status) {
+      case 'assigned':
+        return '#FFA500'; // Orange
+      case 'accepted':
+        return '#32CD32'; // Green
+      case 'started':
+        return '#1E90FF'; // Blue
+      case 'completed':
+        return '#808080'; // Gray
+      default:
+        return '#000000'; // Black
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ScrollView style={styles.scrollView}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Welcome, {clientName}!</Text>
+          <View style={styles.connectionStatus}>
+            <View 
+              style={[
+                styles.statusIndicator, 
+                { backgroundColor: isConnected ? '#4CAF50' : '#F44336' }
+              ]} 
+            />
+            <Text style={styles.statusText}>
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Current Ride Status */}
+        {assignedDriver && (
+          <View style={styles.currentRideContainer}>
+            <Text style={styles.sectionTitle}>Current Ride</Text>
+            <View style={styles.driverInfo}>
+              <Text style={styles.driverName}>Driver: {assignedDriver.name}</Text>
+              <Text style={styles.driverPhone}>Phone: {assignedDriver.phone}</Text>
+              <Text style={[styles.rideStatus, { color: getStatusColor(currentRideStatus) }]}>
+                Status: {currentRideStatus.toUpperCase()}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Ride Request Form */}
+        <View style={styles.formContainer}>
+          <Text style={styles.sectionTitle}>Request a Ride</Text>
+          
+          <View style={styles.inputContainer}>
+            <Text style={styles.label}>Pickup Location</Text>
+            <TextInput
+              style={styles.input}
+              value={pickupLocation}
+              onChangeText={setPickupLocation}
+              placeholder="Enter pickup location"
+              placeholderTextColor="#666"
+              editable={!assignedDriver} // Disable if ride is active
+            />
+          </View>
+
+          <View style={styles.inputContainer}>
+            <Text style={styles.label}>Drop Location</Text>
+            <TextInput
+              style={styles.input}
+              value={dropLocation}
+              onChangeText={setDropLocation}
+              placeholder="Enter drop location"
+              placeholderTextColor="#666"
+              editable={!assignedDriver} // Disable if ride is active
+            />
+          </View>
+
+          <TouchableOpacity
+            style={[
+              styles.requestButton,
+              { opacity: (!isConnected || assignedDriver) ? 0.5 : 1 }
+            ]}
+            onPress={handleRequestRide}
+            disabled={!isConnected || !!assignedDriver}
+          >
+            <Text style={styles.requestButtonText}>
+              {assignedDriver ? 'Ride Active' : 'Request Ride'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Ride History */}
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionTitle}>Ride History</Text>
+          {rideHistory.length === 0 ? (
+            <Text style={styles.noHistoryText}>No ride history yet</Text>
+          ) : (
+            rideHistory.map((ride, index) => (
+              <View key={index} style={styles.historyItem}>
+                <Text style={styles.historyDriver}>Driver: {ride.driver}</Text>
+                <Text style={styles.historyRoute}>
+                  {ride.pickup} → {ride.drop}
+                </Text>
+                <Text style={[styles.historyStatus, { color: getStatusColor(ride.status) }]}>
+                  Status: {ride.status.toUpperCase()}
+                </Text>
+                <Text style={styles.historyTime}>{ride.timestamp}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  header: {
+    backgroundColor: '#2196F3',
+    padding: 20,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  connectionStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusText: {
+    color: '#fff',
+    fontSize: 14,
+  },
+  currentRideContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 12,
+  },
+  driverInfo: {
+    backgroundColor: '#E3F2FD',
+    padding: 12,
+    borderRadius: 6,
+  },
+  driverName: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 4,
+  },
+  driverPhone: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 4,
+  },
+  rideStatus: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  formContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  inputContainer: {
+    marginBottom: 16,
+  },
+  label: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 8,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 6,
+    padding: 12,
+    fontSize: 16,
+    color: '#333',
+    backgroundColor: '#f9f9f9',
+  },
+  requestButton: {
+    backgroundColor: '#4CAF50',
+    borderRadius: 6,
+    padding: 16,
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  requestButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  historyContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  noHistoryText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  historyItem: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    paddingBottom: 12,
+    marginBottom: 12,
+  },
+  historyDriver: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  historyRoute: {
+    fontSize: 14,
+    color: '#666',
+    marginVertical: 2,
+  },
+  historyStatus: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginVertical: 2,
+  },
+  historyTime: {
+    fontSize: 12,
+    color: '#999',
+  },
+});
+
+export default ClientScreen;
+```
+
+### `DriverHome`
+```js
+// components/DriverScreen.tsx
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  ScrollView,
+  SafeAreaView,
+} from 'react-native';
+import socketService from '../services/SocketService';
+
+interface DriverScreenProps {
+  driverId: number;
+  driverName: string;
+}
+
+interface AssignedRide {
+  id: number;
+  clientInfo: {
+    id: number;
+    name: string;
+    phone: string;
+  };
+  pickupLocation: string;
+  dropLocation: string;
+  status: string;
+  timestamp: string;
+}
+
+const DriverScreen: React.FC<DriverScreenProps> = ({ driverId, driverName }) => {
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [assignedRide, setAssignedRide] = useState<AssignedRide | null>(null);
+  const [isAvailable, setIsAvailable] = useState<boolean>(true);
+  const [rideHistory, setRideHistory] = useState<any[]>([]);
+
+  useEffect(() => {
+    // Initialize socket service
+    socketService.initialize();
+    
+    // Setup driver-specific listeners
+    setupSocketListeners();
+    
+    // Connect to server
+    socketService.connect();
+    
+    // Authenticate as driver
+    socketService.authenticate('driver', driverId, driverName);
+
+    // Cleanup on unmount
+    return () => {
+      socketService.cleanup();
+      socketService.disconnect();
+    };
+  }, [driverId, driverName]);
+
+  /**
+   * Setup socket event listeners for driver
+   */
+  const setupSocketListeners = (): void => {
+    // Setup driver-specific listeners
+    socketService.setupDriverListeners();
+
+    // Listen for authentication success
+    socketService.addEventListener('authentication_success', (data: any) => {
+      console.log('Driver authenticated:', data);
+      setIsConnected(true);
+    });
+
+    // Listen for ride assignments
+    socketService.addEventListener('ride_assigned', (data: any) => {
+      console.log('New ride assigned to driver:', data);
+      setAssignedRide({
+        id: data.rideInfo.id,
+        clientInfo: data.clientInfo,
+        pickupLocation: data.rideInfo.pickupLocation,
+        dropLocation: data.rideInfo.dropLocation,
+        status: 'assigned',
+        timestamp: data.rideInfo.timestamp
+      });
+      setIsAvailable(false);
+      
+      // Add to ride history
+      setRideHistory(prev => [...prev, {
+        id: data.rideInfo.id,
+        client: data.clientInfo.name,
+        pickup: data.rideInfo.pickupLocation,
+        drop: data.rideInfo.dropLocation,
+        status: 'assigned',
+        timestamp: new Date().toLocaleString()
+      }]);
+    });
+  };
+
+  /**
+   * Handle ride status update
+   * @param status - New status to update
+   */
+  const handleStatusUpdate = (status: 'accepted' | 'declined' | 'started' | 'completed'): void => {
+    if (!assignedRide) {
+      Alert.alert('Error', 'No assigned ride found');
+      return;
+    }
+
+    // Show confirmation dialog for certain actions
+    if (status === 'declined') {
+      Alert.alert(
+        'Decline Ride',
+        'Are you sure you want to decline this ride?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'Decline', 
+            style: 'destructive',
+            onPress: () => updateRideStatus(status)
+          }
+        ]
+      );
+    } else if (status === 'completed') {
+      Alert.alert(
+        'Complete Ride',
+        'Are you sure you want to mark this ride as completed?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { 
+            text: 'Complete', 
+            onPress: () => updateRideStatus(status)
+          }
+        ]
+      );
+    } else {
+      updateRideStatus(status);
+    }
+  };
+
+  /**
+   * Update ride status via socket
+   * @param status - New status
+   */
+  const updateRideStatus = (status: 'accepted' | 'declined' | 'started' | 'completed'): void => {
+    if (!assignedRide) return;
+
+    socketService.updateRideStatus(assignedRide.id, status);
+    
+    // Update local state
+    setAssignedRide(prev => prev ? { ...prev, status } : null);
+    
+    // Update ride history
+    setRideHistory(prev => 
+      prev.map(ride => 
+        ride.id === assignedRide.id 
+          ? { ...ride, status }
+          : ride
+      )
+    );
+
+    // Handle specific status updates
+    if (status === 'declined' || status === 'completed') {
+      setAssignedRide(null);
+      setIsAvailable(true);
+    }
+  };
+
+  /**
+   * Get status color based on ride status
+   */
+  const getStatusColor = (status: string): string => {
+    switch (status) {
+      case 'assigned':
+        return '#FFA500'; // Orange
+      case 'accepted':
+        return '#32CD32'; // Green
+      case 'started':
+        return '#1E90FF'; // Blue
+      case 'completed':
+        return '#808080'; // Gray
+      case 'declined':
+        return '#FF6B6B'; // Red
+      default:
+        return '#000000'; // Black
+    }
+  };
+
+  /**
+   * Get available action buttons based on current ride status
+   */
+  const getActionButtons = () => {
+    if (!assignedRide) return null;
+
+    switch (assignedRide.status) {
+      case 'assigned':
+        return (
+          <View style={styles.actionButtons}>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.acceptButton]}
+              onPress={() => handleStatusUpdate('accepted')}
+            >
+              <Text style={styles.actionButtonText}>Accept Ride</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.declineButton]}
+              onPress={() => handleStatusUpdate('declined')}
+            >
+              <Text style={styles.actionButtonText}>Decline Ride</Text>
+            </TouchableOpacity>
+          </View>
+        );
+      case 'accepted':
+        return (
+          <View style={styles.actionButtons}>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.startButton]}
+              onPress={() => handleStatusUpdate('started')}
+            >
+              <Text style={styles.actionButtonText}>Start Ride</Text>
+            </TouchableOpacity>
+          </View>
+        );
+      case 'started':
+        return (
+          <View style={styles.actionButtons}>
+            <TouchableOpacity
+              style={[styles.actionButton, styles.completeButton]}
+              onPress={() => handleStatusUpdate('completed')}
+            >
+              <Text style={styles.actionButtonText}>Complete Ride</Text>
+            </TouchableOpacity>
+          </View>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <ScrollView style={styles.scrollView}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Driver: {driverName}</Text>
+          <View style={styles.connectionStatus}>
+            <View 
+              style={[
+                styles.statusIndicator, 
+                { backgroundColor: isConnected ? '#4CAF50' : '#F44336' }
+              ]} 
+            />
+            <Text style={styles.statusText}>
+              {isConnected ? 'Connected' : 'Disconnected'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Availability Status */}
+        <View style={styles.availabilityContainer}>
+          <Text style={styles.sectionTitle}>Availability Status</Text>
+          <View style={styles.availabilityStatus}>
+            <View 
+              style={[
+                styles.availabilityIndicator, 
+                { backgroundColor: isAvailable ? '#4CAF50' : '#F44336' }
+              ]} 
+            />
+            <Text style={styles.availabilityText}>
+              {isAvailable ? 'Available' : 'Busy'}
+            </Text>
+          </View>
+        </View>
+
+        {/* Current Ride */}
+        {assignedRide && (
+          <View style={styles.currentRideContainer}>
+            <Text style={styles.sectionTitle}>Current Ride</Text>
+            <View style={styles.rideInfo}>
+              <Text style={styles.clientName}>Client: {assignedRide.clientInfo.name}</Text>
+              <Text style={styles.clientPhone}>Phone: {assignedRide.clientInfo.phone}</Text>
+              <Text style={styles.location}>Pickup: {assignedRide.pickupLocation}</Text>
+              <Text style={styles.location}>Drop: {assignedRide.dropLocation}</Text>
+              <Text style={[styles.rideStatus, { color: getStatusColor(assignedRide.status) }]}>
+                Status: {assignedRide.status.toUpperCase()}
+              </Text>
+            </View>
+            
+            {getActionButtons()}
+          </View>
+        )}
+
+        {/* No Rides Message */}
+        {!assignedRide && (
+          <View style={styles.noRideContainer}>
+            <Text style={styles.noRideText}>
+              {isAvailable ? 'Waiting for ride assignments...' : 'No current ride'}
+            </Text>
+          </View>
+        )}
+
+        {/* Ride History */}
+        <View style={styles.historyContainer}>
+          <Text style={styles.sectionTitle}>Ride History</Text>
+          {rideHistory.length === 0 ? (
+            <Text style={styles.noHistoryText}>No ride history yet</Text>
+          ) : (
+            rideHistory.map((ride, index) => (
+              <View key={index} style={styles.historyItem}>
+                <Text style={styles.historyClient}>Client: {ride.client}</Text>
+                <Text style={styles.historyRoute}>
+                  {ride.pickup} → {ride.drop}
+                </Text>
+                <Text style={[styles.historyStatus, { color: getStatusColor(ride.status) }]}>
+                  Status: {ride.status.toUpperCase()}
+                </Text>
+                <Text style={styles.historyTime}>{ride.timestamp}</Text>
+              </View>
+            ))
+          )}
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  header: {
+    backgroundColor: '#FF9800',
+    padding: 20,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  title: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  connectionStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  statusIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    marginRight: 8,
+  },
+  statusText: {
+    color: '#fff',
+    fontSize: 14,
+  },
+  availabilityContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 12,
+  },
+  availabilityStatus: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  availabilityIndicator: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginRight: 12,
+  },
+  availabilityText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  currentRideContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  rideInfo: {
+    backgroundColor: '#FFF3E0',
+    padding: 12,
+    borderRadius: 6,
+    marginBottom: 16,
+  },
+  clientName: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginBottom: 4,
+  },
+  clientPhone: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 8,
+  },
+  location: {
+    fontSize: 14,
+    color: '#333',
+    marginBottom: 4,
+  },
+  rideStatus: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    marginTop: 4,
+  },
+  actionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 12,
+  },
+  actionButton: {
+    flex: 1,
+    padding: 14,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  acceptButton: {
+    backgroundColor: '#4CAF50',
+  },
+  declineButton: {
+    backgroundColor: '#F44336',
+  },
+  startButton: {
+    backgroundColor: '#2196F3',
+  },
+  completeButton: {
+    backgroundColor: '#9C27B0',
+  },
+  actionButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  noRideContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 32,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    alignItems: 'center',
+  },
+  noRideText: {
+    fontSize: 16,
+    color: '#666',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  historyContainer: {
+    backgroundColor: '#fff',
+    margin: 16,
+    padding: 16,
+    borderRadius: 8,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+  },
+  noHistoryText: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+  historyItem: {
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    paddingBottom: 12,
+    marginBottom: 12,
+  },
+  historyClient: {
+    fontSize: 14,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  historyRoute: {
+    fontSize: 14,
+    color: '#666',
+    marginVertical: 2,
+  },
+  historyStatus: {
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginVertical: 2,
+  },
+  historyTime: {
+    fontSize: 12,
+    color: '#999',
+  },
+});
+
+export default DriverScreen;
+```
+
+### `Hr Dashboard`
+```js
+// components/HRDashboard.tsx
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  Alert,
+  ScrollView,
+  SafeAreaView,
+  Modal,
+  FlatList,
+} from 'react-native';
+import socketService from '../services/SocketService';
+
+interface HRDashboardProps {
+  hrId: number;
+  hrName: string;
+}
+
+interface RideRequest {
+  id: number;
+  clientId: number;
+  pickupLocation: string;
+  dropLocation: string;
+  status: string;
+  timestamp: string;
+  clientInfo: {
+    id: number;
+    name: string;
+    phone: string;
+    email: string;
+  };
+}
+
+interface Driver {
+  id: number;
+  name: string;
+  phone: string;
+  email: string;
+  isAvailable: boolean;
+}
+
+interface ActiveRide {
+  id: number;
+  clientInfo: any;
+  driverInfo: any;
+  pickupLocation: string;
+  dropLocation: string;
+  status: string;
+  timestamp: string;
+}
+
+const HRDashboard: React.FC<HRDashboardProps> = ({ hrId, hrName }) => {
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [pendingRequests, setPendingRequests] = useState<RideRequest[]>([]);
+  const [availableDrivers, setAvailableDrivers] = useState<Driver[]>([]);
+  const [activeRides, setActiveRides] = useState<ActiveRide[]>([]);
+  const [selectedRequest, setSelectedRequest] = useState<RideRequest | null>(null);
+  const [showDriverModal, setShowDriverModal] = useState<boolean>(false);
+
+  useEffect(() => {
+    // Initialize socket service
+    socketService.initialize();
+    
+    // Setup HR-specific listeners
+    setupSocketListeners();
+    
+    // Connect to server
+    socketService.connect();
+    
+    // Authenticate as HR
+    socketService.authenticate('hr', hrId, hrName);
+
+    // Load initial data
+    loadInitialData();
+
+    // Cleanup on unmount
+    return () => {
+      socketService.cleanup();
+      socketService.disconnect();
+    };
+  }, [hrId, hrName]);
+
+  /**
+   * Load initial data from API
+   */
+  const loadInitialData = async (): Promise<void> => {
+    try {
+      // In a real app, you'd make API calls here
+      // For now, we'll simulate with mock data
+      const mockDrivers: Driver[] = [
+        { id: 1, name: "Driver Mike", phone: "111-222-3333", email: "mike@example.com", isAvailable: true },
+        { id: 2, name: "Driver Sarah", phone: "222-333-4444", email: "sarah@example.com", isAvailable: true },
+        { id: 3, name: "Driver Tom", phone: "333-444-5555", email: "tom@example.com", isAvailable: true },
+        { id: 4, name: "Driver Lisa", phone: "444-555-6666", email: "lisa@example.com", isAvailable: true },
+        { id: 5, name: "Driver David", phone: "555-666-7777", email: "david@example.com", isAvailable: true },
+      ];
+      setAvailableDrivers(mockDrivers);
+    } catch (error) {
+      console.error('Error loading initial data:', error);
+    }
+  };
+
+  /**
+   * Setup socket event listeners for HR
+   */
+  const setupSocketListeners = (): void => {
+    // Setup HR-specific listeners
+    socketService.setupHRListeners();
+
+    // Listen for authentication success
+    socketService.addEventListener('authentication_success', (data: any) => {
+      console.log('HR authenticated:', data);
+      setIsConnected(true);
+    });
+
+    // Listen for new ride requests
+    socketService.addEventListener('new_ride_request', (data: RideRequest) => {
+      console.log('New ride request received in HR dashboard:', data);
+      setPendingRequests(prev => [...prev, data]);
+    });
+
+    // Listen for successful ride assignments
+    socketService.addEventListener('ride_assigned_success', (data: any) => {
+      console.log('Ride assigned successfully in HR dashboard:', data);
+      
+      // Add to active rides
+      setActiveRides(prev => [...prev, data.rideInfo]);
+      
+      // Update driver availability
+      setAvailableDrivers(prev => 
+        prev.map(driver => 
+          driver.id === data.rideInfo.driverId 
+            ? { ...driver, isAvailable: false }
+            : driver
+        )
+      );
+    });
+
+    // Listen for ride status updates
+    socketService.addEventListener('ride_status_updated', (data: any) => {
+      console.log('Ride status updated in HR dashboard:', data);
+      
+      // Update active rides
+      setActiveRides(prev => 
+        prev.map(ride => 
+          ride.id === data.rideId 
+            ? { ...ride, status: data.status }
+            : ride
+        )
+      );
+
+      // If ride is completed, make driver available again
+      if (data.status === 'completed') {
+        const completedRide = activeRides.find(r => r.id === data.rideId);
+        if (completedRide) {
+          setAvailableDrivers(prev => 
+            prev.map(driver => 
+              driver.id === completedRide.driverInfo.id 
+                ? { ...driver, isAvailable: true }
+                : driver
+            )
+          );
+          
+          // Remove from active rides
+          setActiveRides(prev => prev.filter(ride => ride.id !== data.rideId));
+        }
+      }
+    });
+  };
+
+  /**
+   * Handle ride request approval
+   * @param request - The ride request to approve
+   */
+  const handleApproveRequest = (request: RideRequest): void => {
+    setSelectedRequest(request);
+    setShowDriverModal(true);
+  };
+
+  /**
+   * Handle ride request rejection
+   * @param request - The ride request to reject
+   */
+  const handleRejectRequest = (request: RideRequest): void => {
+    Alert.alert(
+      'Reject Ride Request',
+      `Are you sure you want to reject the ride request from ${request.clientInfo.name}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Reject', 
+          style: 'destructive',
+          onPress: () => {
+            socketService.processRideRequest(request.id, 'reject');
+            // Remove from pending requests
+            setPendingRequests(prev => prev.filter(r => r.id !== request.id));
+          }
+        }
+      ]
+    );
+  };
+
+  /**
+   * Handle driver assignment
+   * @param driverId - The driver ID to assign
+   */
+  const handleAssignDriver = (driverId: number): void => {
+    if (!selectedRequest) return;
+
+    socketService.processRideRequest(selectedRequest.id, 'approve', driverId);
+    
+    // Remove from pending requests
+    setPendingRequests(prev => prev.filter(r => r.id !== selectedRequest.id));
+    
+    // Close modal
+    setShowDriverModal(false);
+    setSelectedRequest(null);
+  };
+
+  /**
+   * Get status color based on ride status
+   */
+  const getStatusColor = (status: string): string => {
+    switch (status) {
+      case 'pending':
+        return '#FFA500'; // Orange
+      case 'assigned':
+        return '#2196F3'; // Blue
+      case 'accepted':
+        return '#4CAF50'; // Green
+      case 'started':
+        return '#9C27B0'; // Purple
+      case 'completed':
+        return '#808080'; // Gray
+      case 'rejected':
+        return '#F44336'; // Red
+      default:
+        return '#000000'; // Black
+    }
+  };
+
+  /**
+   * Format timestamp for display
+   */
+  const formatTimestamp = (timestamp: string): string => {
+    return new Date(timestamp).toLocaleString();
+  };
+
+  /**
+   * Render pending ride request item
+   */
+  const renderPendingRequest = (request: RideRequest) => (
+    <View key={request.id} style={styles.requestItem}>
+      <View style={styles.requestHeader}>
+        <Text style={styles.clientName}>{request.clientInfo.name}</Text>
+        <Text style={styles.timestamp}>{formatTimestamp(request.timestamp)}</Text>
+      </View>
+      
+      <Text style={styles.clientPhone}>Phone: {request.clientInfo.phone}</Text>
+      <Text style={styles.location}>From: {request.pickupLocation}</Text>
+      <Text style={styles.location}>To: {request.dropLocation}</Text>
+      
+      <View style={styles.requestActions}>
+        <TouchableOpacity
+          style={[styles.actionButton, styles.approveButton]}
+          onPress={() => handleApproveRequest(request)}
+        >
+          <Text style={styles.actionButtonText}>Approve</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.actionButton, styles.rejectButton]}
+          onPress={() => handleRejectRequest(request)}
+        >
+          <Text style={styles.actionButtonText}>Reject</Text>
+        </TouchableOpacity>
+      </View>
+    </View>
+  );
+
+  /**
+   * Render active ride item
+   */
+  const renderActiveRide = (ride: ActiveRide) => (
+    <View key={ride.id} style={styles.activeRideItem}>
+      <View style={styles.rideHeader}>
+        <Text style={styles.rideName}>
+          {ride.clientInfo.name} → {ride.driverInfo.name}
+        </Text>
+        <Text style={[styles.rideStatus, { color: getStatusColor(ride.status) }]}>
+          {ride.status.toUpperCase()}
+        </Text>
+      </View>
+      
+      <Text style={styles
+
+      ....
+      
+```
+
+
+
+
+
+---
+---
+
+
 # Real-Time Ride Booking System Architecture
 
 ## System Overview
